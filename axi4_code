@@ -1,0 +1,519 @@
+module axi_master(
+    input clk,
+    input rst,
+
+    input start_write,
+    input start_read,
+
+    input [31:0] base_write_addr,
+    input [31:0] base_read_addr,
+    input [31:0] write_data,
+
+    input [7:0] burst_len,
+
+    output reg done,
+    output reg error,
+
+    // WRITE ADDRESS
+    output reg [31:0] AWADDR,
+    output reg [7:0]  AWLEN,
+    output reg        AWVALID,
+    input             AWREADY,
+
+    // WRITE DATA
+    output reg [31:0] WDATA,
+    output reg        WVALID,
+    output reg        WLAST,
+    input             WREADY,
+
+    // WRITE RESPONSE
+    input  [1:0] BRESP,
+    input        BVALID,
+    output reg   BREADY,
+
+    // READ ADDRESS
+    output reg [31:0] ARADDR,
+    output reg [7:0]  ARLEN,
+    output reg        ARVALID,
+    input             ARREADY,
+
+    // READ DATA
+    input  [31:0] RDATA,
+    input  [1:0]  RRESP,
+    input         RVALID,
+    input         RLAST,
+    output reg    RREADY
+);
+
+reg [2:0] state;
+reg [7:0] beat_count;
+
+localparam IDLE=0,
+           WR_ADDR=1,
+           WR_DATA=2,
+           WR_RESP=3,
+           RD_ADDR=4,
+           RD_DATA=5;
+
+always @(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        state <= IDLE;
+        done  <= 0;
+        error <= 0;
+
+        AWVALID <= 0;
+        WVALID  <= 0;
+        WLAST   <= 0;
+        BREADY  <= 0;
+        ARVALID <= 0;
+        RREADY  <= 0;
+
+        beat_count <= 0;
+    end
+    else
+    begin
+        done  <= 0;
+        error <= 0;
+
+        case(state)
+
+IDLE:
+        begin
+        if(start_write)
+        begin
+        AWADDR  <= base_write_addr;
+        AWLEN   <= burst_len;
+        AWVALID <= 1;
+        state   <= WR_ADDR;
+        end
+        else if(start_read)
+        begin
+                ARADDR  <= base_read_addr;
+                ARLEN   <= burst_len;
+                ARVALID <= 1;
+                state   <= RD_ADDR;
+        end
+        end
+WR_ADDR:
+        begin
+        if(AWVALID && AWREADY)
+        begin
+        AWVALID <= 0;
+        beat_count <= 0;
+        WDATA  <= write_data;
+        WVALID <= 1;
+        WLAST  <= (0 == burst_len);
+        state <= WR_DATA;
+        end
+        end
+WR_DATA:
+        begin
+        if(WVALID && WREADY)
+        begin
+        if(beat_count == burst_len)
+        begin
+        WVALID <= 0;
+        WLAST  <= 0;
+        BREADY <= 1;
+        state  <= WR_RESP;
+        end
+        else
+        begin
+        beat_count <= beat_count + 1;
+        WDATA <= write_data + beat_count + 1;
+        WLAST <= (beat_count + 1 == burst_len);
+        end
+        end
+        end
+WR_RESP:
+        begin
+        if(BVALID && BREADY)
+        begin
+        BREADY <= 0;
+
+        if(BRESP != 2'b00)
+        error <= 1;
+        done  <= 1;
+        state <= IDLE;
+        end
+        end
+RD_ADDR:
+        begin
+        if(ARVALID && ARREADY)
+        begin
+        ARVALID <= 0;
+        beat_count <= 0;
+        RREADY <= 1;
+        state  <= RD_DATA;
+        end
+        end
+RD_DATA:
+        begin
+        if(RVALID && RREADY)
+        begin
+        if(RRESP != 2'b00)
+        error <= 1;
+
+        if(RLAST)
+        begin
+        RREADY <= 0;
+        done   <= 1;
+        state  <= IDLE;
+        end
+        else
+        begin
+        beat_count <= beat_count + 1;
+        end
+        end
+        end
+
+        endcase
+    end
+end
+
+endmodule
+
+`timescale 1ns/1ps
+
+module axi_slave(
+    input clk,
+    input rst,
+
+    // WRITE ADDRESS
+    input  [31:0] AWADDR,
+    input  [7:0]  AWLEN,
+    input         AWVALID,
+    output reg    AWREADY,
+
+    // WRITE DATA
+    input  [31:0] WDATA,
+    input         WVALID,
+    input         WLAST,
+    output reg    WREADY,
+
+    // WRITE RESPONSE
+    output reg [1:0] BRESP,
+    output reg       BVALID,
+    input            BREADY,
+
+    // READ ADDRESS
+    input  [31:0] ARADDR,
+    input  [7:0]  ARLEN,
+    input         ARVALID,
+    output reg    ARREADY,
+
+    // READ DATA
+    output reg [31:0] RDATA,
+    output reg [1:0]  RRESP,
+    output reg        RVALID,
+    output reg        RLAST,
+    input             RREADY
+);
+
+reg [2:0] state;
+reg [7:0] beat_count;
+reg [31:0] mem [0:255];
+reg [31:0] addr;
+
+localparam IDLE=0,
+           WR_DATA=1,
+           WR_RESP=2,
+           RD_DATA=3;
+
+always @(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        state <= IDLE;
+
+        AWREADY <= 0;
+        WREADY  <= 0;
+        BVALID  <= 0;
+
+        ARREADY <= 0;
+        RVALID  <= 0;
+        RLAST   <= 0;
+
+        beat_count <= 0;
+    end
+    else
+    begin
+        case(state)
+IDLE:
+     begin
+            // WRITE ADDRESS HANDSHAKE
+        if(AWVALID)
+         begin
+         AWREADY <= 1;
+         addr <= AWADDR;
+         beat_count <= 0;
+         state <= WR_DATA;
+         end
+            // READ ADDRESS HANDSHAKE
+         else if(ARVALID)
+         begin
+         ARREADY <= 1;
+         addr <= ARADDR;
+         beat_count <= 0;
+         state <= RD_DATA;
+         end
+        end
+WR_DATA:
+        begin
+        AWREADY <= 0;
+        WREADY  <= 1;
+
+        if(WVALID && WREADY)
+        begin
+        mem[addr[9:2] + beat_count] <= WDATA;
+
+        if(WLAST)
+        begin
+        WREADY <= 0;
+        BVALID <= 1;
+        BRESP  <= 2'b00;
+        state  <= WR_RESP;
+        end
+        else
+        beat_count <= beat_count + 1;
+        end
+        end
+WR_RESP:
+        begin
+            if(BVALID && BREADY)
+            begin
+                BVALID <= 0;
+                state  <= IDLE;
+            end
+        end
+
+RD_DATA:
+        begin
+        ARREADY <= 0;
+        RVALID  <= 1;
+
+        RDATA <= mem[addr[9:2] + beat_count];
+        RRESP <= 2'b00;
+        RLAST <= (beat_count == ARLEN);
+
+        if(RVALID && RREADY)
+        begin
+        if(RLAST)
+        begin
+        RVALID <= 0;
+        RLAST  <= 0;
+        state  <= IDLE;
+        end
+        else
+          beat_count <= beat_count + 1;
+        end
+        end
+
+        endcase
+    end
+end
+
+endmodule
+
+module axi_top(
+    input clk,
+    input rst,
+    input start_write,
+    input start_read,
+    input [31:0] base_write_addr,
+    input [31:0] base_read_addr,
+    input [31:0] write_data,
+    input [7:0]  burst_len,
+    output done,
+    output error
+);
+
+// Write channel wires
+wire [31:0] AWADDR;
+wire [7:0]  AWLEN;
+wire        AWVALID;
+wire        AWREADY;
+
+wire [31:0] WDATA;
+wire        WVALID;
+wire        WLAST;
+wire        WREADY;
+
+wire [1:0]  BRESP;
+wire        BVALID;
+wire        BREADY;
+
+// Read channel wires
+wire [31:0] ARADDR;
+wire [7:0]  ARLEN;
+wire        ARVALID;
+wire        ARREADY;
+
+wire [31:0] RDATA;
+wire [1:0]  RRESP;
+wire        RVALID;
+wire        RLAST;
+wire        RREADY;
+
+
+// MASTER
+axi_master master(
+    .clk(clk),
+    .rst(rst),
+    .start_write(start_write),
+    .start_read(start_read),
+    .base_write_addr(base_write_addr),
+    .base_read_addr(base_read_addr),
+    .write_data(write_data),
+    .burst_len(burst_len),
+    .done(done),
+    .error(error),
+
+    .AWADDR(AWADDR),
+    .AWLEN(AWLEN),
+    .AWVALID(AWVALID),
+    .AWREADY(AWREADY),
+
+    .WDATA(WDATA),
+    .WVALID(WVALID),
+    .WLAST(WLAST),
+    .WREADY(WREADY),
+
+    .BRESP(BRESP),
+    .BVALID(BVALID),
+    .BREADY(BREADY),
+
+    .ARADDR(ARADDR),
+    .ARLEN(ARLEN),
+    .ARVALID(ARVALID),
+    .ARREADY(ARREADY),
+
+    .RDATA(RDATA),
+    .RRESP(RRESP),
+    .RVALID(RVALID),
+    .RLAST(RLAST),
+    .RREADY(RREADY)
+);
+
+
+// SLAVE
+axi_slave slave(
+    .clk(clk),
+    .rst(rst),
+
+    .AWADDR(AWADDR),
+    .AWLEN(AWLEN),
+    .AWVALID(AWVALID),
+    .AWREADY(AWREADY),
+
+    .WDATA(WDATA),
+    .WVALID(WVALID),
+    .WLAST(WLAST),
+    .WREADY(WREADY),
+
+    .BRESP(BRESP),
+    .BVALID(BVALID),
+    .BREADY(BREADY),
+
+    .ARADDR(ARADDR),
+    .ARLEN(ARLEN),
+    .ARVALID(ARVALID),
+    .ARREADY(ARREADY),
+
+    .RDATA(RDATA),
+    .RRESP(RRESP),
+    .RVALID(RVALID),
+    .RLAST(RLAST),
+    .RREADY(RREADY)
+);
+
+endmodule
+
+`timescale 1ns/1ps
+
+module tb_axi;
+
+reg clk;
+reg rst;
+reg start_write;
+reg start_read;
+reg [31:0] base_write_addr;
+reg [31:0] base_read_addr;
+reg [31:0] write_data;
+reg [7:0] burst_len;
+
+wire done;
+wire error;
+
+axi_top dut(
+    .clk(clk),
+    .rst(rst),
+    .start_write(start_write),
+    .start_read(start_read),
+    .base_write_addr(base_write_addr),
+    .base_read_addr(base_read_addr),
+    .write_data(write_data),
+    .burst_len(burst_len),
+    .done(done),
+    .error(error)
+);
+
+initial clk = 0;
+always #5 clk = ~clk;
+
+initial
+begin
+$monitor("T=%0t | AWADDR=%h AWVALID=%b AWREADY=%b | WDATA=%h WVALID=%b WREADY=%b | BRESP=%b BVALID=%b | ARADDR=%h ARVALID=%b ARREADY=%b | RDATA=%h RVALID=%b RREADY=%b",
+$time,
+dut.master.AWADDR, dut.master.AWVALID, dut.slave.AWREADY,
+dut.master.WDATA, dut.master.WVALID, dut.slave.WREADY,
+dut.slave.BRESP, dut.slave.BVALID,
+dut.master.ARADDR, dut.master.ARVALID, dut.slave.ARREADY,
+dut.slave.RDATA, dut.slave.RVALID, dut.master.RREADY
+);
+end
+
+initial
+begin
+
+rst = 1;
+start_write = 0;
+start_read  = 0;
+
+base_write_addr = 32'h00000010;
+base_read_addr  = 32'h00000010;
+write_data      = 32'hA0000000;
+burst_len       = 8'd3;
+
+#20;
+rst = 0;
+
+#20;
+
+$display("START WRITE");
+start_write = 1;
+#10;
+start_write = 0;
+
+wait(done);
+
+#30;
+
+$display("START READ");
+start_read = 1;
+#10;
+start_read = 0;
+
+wait(done);
+
+#50;
+
+$display("SIMULATION COMPLETE");
+
+$finish;
+
+end
+
+endmodule
